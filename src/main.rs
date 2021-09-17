@@ -1,66 +1,49 @@
+#[macro_use]
+extern crate bson;
+#[macro_use]
+extern crate anyhow;
+
+use crate::article::Article;
+use crate::common::*;
+use actix_web::{web, App, FromRequest, HttpServer};
+
+mod article;
 mod common;
+mod middleware;
 
-use actix_web::{web, App, HttpRequest, HttpServer, Responder};
-use log::info;
+const DEFAULT_CONFIG_FILE: &str = "config.yml";
+const CONFIG_FILE_ENV: &str = "MYBLOG_CONFIG";
 
-// 日志打印
-fn init_logger() {
-    use chrono::Local;
-    use std::io::Write;
+#[actix_web::main]
+async fn main() -> anyhow::Result<()> {
+    common::init_logger();
 
-    let env = env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info");
-    //设置日志打印格式
-    env_logger::Builder::from_env(env)
-        .format(|buf, record| {
-            writeln!(
-                buf,
-                "{} {} [{}] {}",
-                Local::now().format("%Y-%m-%d %H:%M:%S"),
-                record.level(),
-                record.module_path().unwrap_or("<unnamed>"),
-                &record.args()
+    let config = myblog_config();
+    log::info!("[load_config] {:?}", config);
+
+    actix_web::web::block(|| Result::<(), ()>::Ok(autowired::setup_submitted_beans())).await?;
+    log::info!("[beans] loaded: {:?}", autowired::list_bean_names());
+
+    let binding_address = format!("{}:{}", config.host, config.port);
+    HttpServer::new(|| {
+        App::new()
+            .app_data(web::Json::<Article>::configure(|cfg| {
+                cfg.error_handler(|err, req| {
+                    log::error!("json extractor error, path={}, {}", req.uri(), err);
+                    BusinessError::ArgumentError.into()
+                })
+            }))
+            .service(
+                web::scope("/articles")
+                    .route("", web::get().to(article::list_article))
+                    .route("", web::post().to(article::save_article))
+                    .route("{id}", web::put().to(article::update_article))
+                    .route("{id}", web::delete().to(article::remove_article)),
             )
-        })
-        .init();
-    info!("env_logger initialized .");
-}
-
-fn greet(req: HttpRequest) -> impl Responder {
-    let name = req.match_info().get("name").unwrap_or("world");
-    format!("Hello {}!", &name)
-}
-
-// TODO 将actix-web版本升至latest
-fn main() {
-    init_logger();
-    info!("hello world");
-
-    let binding_address = "0.0.0.0:8000";
-    let server = HttpServer::new(|| {
-        App::new()
-            .route("/", web::get().to(greet))
-            .route("/{name}", web::get().to(greet))
     })
-    .bind(binding_address).expect("Can not bind to port 8000");
-
-    server.run().unwrap();
-}
-
-#[test]
-fn logger_test() {
-    init_logger();
-    info!("hello world");
-}
-
-#[test]
-fn greet_test() {
-    let binding_address = "0.0.0.0:8000";
-    let server = HttpServer::new(|| {
-        App::new()
-            .route("/", web::get().to(greet))
-            .route("/{name}", web::get().to(greet))
-    })
-    .bind(binding_address).expect("Can not bind to port 8000");
-
-    server.run().unwrap();
+    .bind(&binding_address)
+    .expect(&format!("Can not bind to {}", binding_address))
+    .run()
+    .await?;
+    Ok(())
 }
